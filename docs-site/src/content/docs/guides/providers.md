@@ -736,6 +736,8 @@ Create a key in the [OpenGateway dashboard](https://opengateway.ai/api-keys), th
 use the configured Bearer key; the public model list does not validate that key.
 On the Responses wire OpenGateway rejects replayed native custom tool calls, so the preset
 lowers Codex custom tools such as code-mode `exec` to function tools before sending them.
+Tool-result content arrays are sent as text with images preserved in adjacent messages.
+Image detail `original` maps to `high`, which the gateway accepts; image bytes remain unchanged.
 
 **TokenLab** ([sponsor](https://github.com/lidge-jun/opencodex/blob/main/SPONSORS.md)) is an
 OpenAI-compatible API gateway at [tokenlab.sh](https://tokenlab.sh/r/OPENCODEX),

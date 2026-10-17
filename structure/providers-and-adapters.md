@@ -323,6 +323,7 @@ Responses (`openai/o3-pro`); public discovery does not establish key validity. S
 `deepseek/deepseek-v4.1-flash-ultrafast` and `z-ai/glm-5.3-flash-ultrafast` are listed first. A custom model that replaces one of the discovered rows keeps
 that row's slot (`src/codex/catalog/routed-gather.ts`).
 Keys are created at `https://opengateway.ai/api-keys`.
+`src/adapters/openai-responses/opengateway-input.ts`는 OpenGateway의 `/v1/responses` 전송 직전에 텍스트 도구 결과 배열을 문자열로 바꾼다. `call_id`와 텍스트 순서는 유지한다. 이미지가 섞인 결과는 원본 이미지와 내용 순서를 사용자 메시지로 보존하며 병렬 호출의 결과 묶음 뒤에 둔다. 이미지의 `detail: original`은 upstream이 수용하는 `high`로 바꾸되 이미지 바이트는 바꾸지 않는다. 알 수 없는 형식과 암호화된 결과 배열은 조용히 삭제하지 않고 기존 검증에 남긴다. 다른 목적지와 원본 요청 객체는 바꾸지 않는다. `tests/providers/opengateway-provider.test.ts`가 실제 adapter 직렬화 경계에서 이 계약을 확인한다.
 
 ## TokenLab chat provider
 
