@@ -1,64 +1,97 @@
 import { isPlainObject } from "./internal";
 import { normalizeResponsesToolResultAdjacency } from "./tool-output-recovery";
 
+const TOOL_ROUND_TYPES = new Set([
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "local_shell_call",
+  "local_shell_call_output",
+]);
+
 function normalizeImageDetail(part: unknown): unknown {
   return isPlainObject(part) && part.type === "input_image" && part.detail === "original"
     ? { ...part, detail: "high" }
     : part;
 }
 
-/** OpenGateway requires string tool results and auto/low/high image detail. */
-export function normalizeOpenGatewayResponsesInput(body: unknown, url: string): unknown {
-  const destination = new URL(url);
-  if (destination.origin !== "https://apis.opengateway.ai" || destination.pathname !== "/v1/responses"
-    || !isPlainObject(body) || !Array.isArray(body.input)) return body;
+function isToolRound(item: unknown): boolean {
+  return isPlainObject(item) && typeof item.type === "string" && TOOL_ROUND_TYPES.has(item.type);
+}
 
+function pairedCallId(item: Record<string, unknown>): string | undefined {
+  return typeof item.call_id === "string" && item.call_id.length > 0 ? item.call_id : undefined;
+}
+
+type ProjectedInput = { readonly changed: boolean; readonly input: unknown[] };
+
+function projectOpenGatewayInput(input: readonly unknown[]): ProjectedInput {
   let changed = false;
-  const input: unknown[] = [];
+  const projected: unknown[] = [];
   const pendingImages: unknown[] = [];
-  for (const item of body.input) {
-    if (!isPlainObject(item) || item.type !== "function_call_output") {
-      input.push(...pendingImages);
-      pendingImages.length = 0;
+  const flushImages = (): void => {
+    if (pendingImages.length === 0) return;
+    projected.push(...pendingImages);
+    pendingImages.length = 0;
+  };
+  for (const item of input) {
+    if (!isToolRound(item)) flushImages();
+    if (!isPlainObject(item)) {
+      projected.push(item);
+      continue;
     }
-    if (!isPlainObject(item)) { input.push(item); continue; }
     if (item.type === "function_call_output" && Array.isArray(item.output)) {
+      const callId = pairedCallId(item);
       const content: Record<string, unknown>[] = [];
       const text: string[] = [];
-      let supported = true;
+      let supported = callId !== undefined;
       let hasImage = false;
-      for (const part of item.output) {
-        if (!isPlainObject(part)) { supported = false; break; }
-        switch (part.type) {
-          case "text":
-          case "input_text":
-          case "output_text":
-            if (typeof part.text !== "string") { supported = false; break; }
-            text.push(part.text);
-            content.push({ type: "input_text", text: part.text });
-            break;
-          case "refusal":
-            if (typeof part.refusal !== "string") { supported = false; break; }
-            text.push(`[refusal] ${part.refusal}`);
-            content.push({ type: "input_text", text: `[refusal] ${part.refusal}` });
-            break;
-          case "input_image":
-            if (typeof part.image_url !== "string" && typeof part.file_id !== "string") { supported = false; break; }
-            content.push({ ...part, ...(part.detail === "original" ? { detail: "high" } : {}) });
-            hasImage = true;
-            break;
-          default:
-            supported = false;
-        }
-        if (!supported) break;
-      }
-      // Opaque or unsupported parts must remain visible to validation, never disappear.
       if (supported) {
+        for (const part of item.output) {
+          if (!isPlainObject(part)) {
+            supported = false;
+            break;
+          }
+          switch (part.type) {
+            case "text":
+            case "input_text":
+            case "output_text":
+              if (typeof part.text !== "string") {
+                supported = false;
+                break;
+              }
+              text.push(part.text);
+              content.push({ type: "input_text", text: part.text });
+              break;
+            case "input_image":
+              if (typeof part.image_url !== "string" && typeof part.file_id !== "string") {
+                supported = false;
+                break;
+              }
+              content.push({ ...part, ...(part.detail === "original" ? { detail: "high" } : {}) });
+              hasImage = true;
+              break;
+            default:
+              supported = false;
+          }
+          if (!supported) break;
+        }
+      }
+      if (supported && callId !== undefined) {
         changed = true;
-        input.push({ ...item, output: text.join("\n") });
-        if (hasImage) pendingImages.push({ type: "message", role: "user", content: [
-          { type: "input_text", text: `[tool output for ${item.call_id}]` }, ...content,
-        ] });
+        const marker = `[tool output for ${callId}]`;
+        projected.push({
+          ...item,
+          output: text.length > 0 ? text.join("\n") : hasImage ? marker : "",
+        });
+        if (hasImage) {
+          pendingImages.push({
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: marker }, ...content],
+          });
+        }
         continue;
       }
     }
@@ -67,12 +100,28 @@ export function normalizeOpenGatewayResponsesInput(body: unknown, url: string): 
       const content = originalContent.map(normalizeImageDetail);
       if (content.some((part, index) => part !== originalContent[index])) {
         changed = true;
-        input.push({ ...item, content });
+        projected.push({ ...item, content });
         continue;
       }
     }
-    input.push(item);
+    projected.push(item);
   }
-  input.push(...pendingImages);
-  return changed ? normalizeResponsesToolResultAdjacency({ ...body, input }) : body;
+  flushImages();
+  return { changed, input: projected };
+}
+
+/** OpenGateway requires string tool results and auto/low/high image detail. */
+export function normalizeOpenGatewayResponsesInput(body: unknown, url: string): unknown {
+  const destination = new URL(url);
+  if (destination.origin !== "https://apis.opengateway.ai" || destination.pathname !== "/v1/responses"
+    || !isPlainObject(body) || !Array.isArray(body.input)) return body;
+
+  const direct = projectOpenGatewayInput(body.input);
+  if (!direct.changed) return body;
+  const aligned = normalizeResponsesToolResultAdjacency(body);
+  if (!isPlainObject(aligned) || !Array.isArray(aligned.input) || aligned === body) {
+    return { ...body, input: direct.input };
+  }
+  const paired = projectOpenGatewayInput(aligned.input);
+  return { ...aligned, input: paired.changed ? paired.input : direct.input };
 }

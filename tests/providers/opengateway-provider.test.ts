@@ -182,7 +182,7 @@ describe("OpenGateway Responses tool result arrays", () => {
   });
 
   test("string and unsupported opaque result arrays are preserved", () => {
-    for (const output of ["exact string", [{ type: "encrypted_content", encrypted_content: "opaque" }]]) {
+    for (const output of ["exact string", [{ type: "encrypted_content", encrypted_content: "opaque" }], [{ type: "refusal", refusal: "no" }], [{ type: "input_text", text: "keep" }, { type: "encrypted_content", encrypted_content: "opaque" }]]) {
       const input = build([
         { type: "function_call", call_id: "a", name: "echo", arguments: "{}" },
         { type: "function_call_output", call_id: "a", output },

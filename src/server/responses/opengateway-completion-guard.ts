@@ -72,33 +72,51 @@ async function inspect(response: Response, options: OpenGatewayCompletionGuardOp
   const reader = guarded.response.body?.getReader();
   if (!reader) return { kind: "pass", response };
   const framer = new BoundedSseFrameBuffer(MAX_BYTES);
-  const held: Uint8Array[] = [];
+  const held: Array<Uint8Array | undefined> = [];
   let bytes = 0, events = 0, transferred = false, cleaned = false;
   let pending: ReturnType<typeof reader.read> | undefined;
   const holdMs = options.holdTimeoutMs ?? MAX_HOLD_MS;
   const deadline = performance.now() + holdMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<"expired">(resolve => { timer = setTimeout(() => resolve("expired"), holdMs); });
-  const cleanup = () => {
+  const dropHeld = (): void => {
+    for (let index = 0; index < held.length; index += 1) held[index] = undefined;
+  };
+  const finishOwned = (): void => {
     if (cleaned) return;
     cleaned = true;
     guarded.dispose();
-    reader.releaseLock();
+    try { reader.releaseLock(); }
+    catch (error) { if (!(error instanceof TypeError)) throw error; }
+  };
+  const cancelOwned = (reason?: unknown): void => {
+    if (cleaned) return;
+    cleaned = true;
+    dropHeld();
+    try { void reader.cancel(reason).catch(() => {}); }
+    catch (error) { if (!(error instanceof TypeError)) throw error; }
+    guarded.dispose();
   };
   const pass = (): Inspection => {
     transferred = true;
     let index = 0;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
-        if (index < held.length) { controller.enqueue(held[index++]); return; }
+        if (index < held.length) {
+          const chunk = held[index];
+          held[index] = undefined;
+          index += 1;
+          if (chunk) controller.enqueue(chunk);
+          return;
+        }
         try {
           const next = await (pending ?? reader.read());
           pending = undefined;
-          if (next.done) { cleanup(); controller.close(); }
+          if (next.done) { finishOwned(); controller.close(); }
           else controller.enqueue(next.value);
-        } catch (error) { cleanup(); controller.error(error); }
+        } catch (error) { cancelOwned(error); controller.error(error); }
       },
-      cancel() { cleanup(); },
+      cancel(reason) { dropHeld(); cancelOwned(reason); },
     }, { highWaterMark: 0 });
     return { kind: "pass", response: carryResponseToolOwnership(response, new Response(body, {
       status: response.status, statusText: response.statusText, headers: response.headers,
@@ -128,7 +146,7 @@ async function inspect(response: Response, options: OpenGatewayCompletionGuardOp
       if (!streaming) {
         if (!next.done) continue;
         let snapshot: unknown;
-        try { snapshot = JSON.parse(decoder.decode(joinSseFrameBytes(held))); }
+        try { snapshot = JSON.parse(decoder.decode(joinSseFrameBytes(held.flatMap(chunk => chunk ? [chunk] : [])))); }
         catch { return terminal(undefined); }
         if (isPlainObject(snapshot) && (outputCommits(snapshot.output)
           || snapshot.error != null || ["failed", "incomplete", "queued", "in_progress"].includes(String(snapshot.status)))) return pass();
@@ -156,24 +174,31 @@ async function inspect(response: Response, options: OpenGatewayCompletionGuardOp
     }
   } finally {
     clearTimeout(timer); framer.dispose();
-    if (!transferred) cleanup();
+    if (!transferred) cancelOwned();
   }
 }
 
 function terminalResponse(source: Response, inspection: Exclude<Inspection, { kind: "pass" }>, reason: string): Response {
   const incomplete = reason === "max_output_tokens";
-  const snapshot = { ...inspection.snapshot, status: incomplete ? "incomplete" : "failed",
-    ...(incomplete ? { incomplete_details: { reason } } : { error: {
+  const snapshot: RecordValue = { ...inspection.snapshot, status: incomplete ? "incomplete" : "failed" };
+  if (incomplete) {
+    snapshot.incomplete_details = { reason };
+    delete snapshot.error;
+  } else {
+    snapshot.error = {
       type: "upstream_error", code: reason, message: "OpenGateway returned no usable completion before output.",
-    } }),
-  };
+    };
+    delete snapshot.incomplete_details;
+  }
   const headers = new Headers(source.headers);
   headers.delete("content-length"); headers.delete("content-encoding");
   if (inspection.streaming) headers.set("content-type", "text/event-stream");
   const text = inspection.streaming
     ? `event: response.${snapshot.status}\ndata: ${JSON.stringify({ type: `response.${snapshot.status}`, response: snapshot })}\n\n`
     : JSON.stringify(snapshot);
-  return new Response(text, { status: inspection.streaming || incomplete ? 200 : 502, headers });
+  return carryResponseToolOwnership(source, new Response(text, {
+    status: inspection.streaming || incomplete ? 200 : 502, headers,
+  }));
 }
 
 export async function guardOpenGatewayCompletion(response: Response, options: OpenGatewayCompletionGuardOptions): Promise<Response> {
@@ -185,19 +210,22 @@ export async function guardOpenGatewayCompletion(response: Response, options: Op
   const canReplay = options.retryEnabled !== false && process.env[EMPTY_COMPLETION_RETRY_ENV] !== "0"
     && selfContainedResponsesBody(body) && !isNonReplayableResponse(response);
   let selected = response;
+  let physicalRetries = 0;
   for (let attempt = 0; ; attempt++) {
     const inspected = await inspect(selected, options);
     if (inspected.kind === "pass") return inspected.response;
-    if (inspected.kind === "invalid") return terminalResponse(selected, inspected, "invalid_completion");
     const usage = inspected.snapshot.usage;
+    options.recordUsage(usage);
+    if (inspected.kind === "invalid") return terminalResponse(selected, inspected, "invalid_completion");
     if (typeof body.max_output_tokens === "number" && body.max_output_tokens > 0
       && isPlainObject(usage) && typeof usage.output_tokens === "number" && usage.output_tokens >= body.max_output_tokens) {
       return terminalResponse(selected, inspected, "max_output_tokens");
     }
-    if (attempt > 0 || !canReplay || options.signal.aborted) {
-      return terminalResponse(selected, inspected, attempt > 0 ? "empty_completion_retry_failed" : "empty_completion");
+    if (attempt > 0 || physicalRetries > 0 || !canReplay || options.signal.aborted) {
+      return terminalResponse(selected, inspected, attempt > 0 || physicalRetries > 0
+        ? "empty_completion_retry_failed" : "empty_completion");
     }
-    options.recordUsage(usage);
+    physicalRetries += 1;
     selected = await options.retry();
     if (selected.status !== 200) return selected;
   }

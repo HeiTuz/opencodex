@@ -736,7 +736,7 @@ Create a key in the [OpenGateway dashboard](https://opengateway.ai/api-keys), th
 use the configured Bearer key; the public model list does not validate that key.
 On the Responses wire OpenGateway rejects replayed native custom tool calls, so the preset
 lowers Codex custom tools such as code-mode `exec` to function tools before sending them.
-Tool-result content arrays are sent as text with images preserved in adjacent messages.
+Tool-result content arrays are sent as text, with images preserved after the paired tool-result group. Unsupported parts, including refusals, stay on the original array instead of being rewritten into a successful string.
 Image detail `original` maps to `high`, which the gateway accepts; image bytes remain unchanged.
 The native Responses route also checks text-only empty completions before exposing them as success.
 Exhausted output budgets produce `incomplete` with `max_output_tokens`; the proxy does not increase

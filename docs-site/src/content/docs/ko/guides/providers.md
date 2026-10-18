@@ -278,7 +278,7 @@ Chat Completions 모델(그리고 Responses 전용이라 Responses로 보내는 
 [OpenGateway 대시보드](https://opengateway.ai/api-keys)에서 키를 발급한 뒤
 `ocx provider add opengateway`를 실행하거나 대시보드에서 **OpenGateway**를 선택하세요.
 Chat 요청은 설정한 Bearer 키를 사용하며 공개 모델 목록은 키의 유효성을 검증하지 않습니다.
-Responses 도구 결과 배열은 텍스트로 변환하고 이미지는 인접 메시지에 보존합니다.
+Responses 도구 결과 배열은 텍스트로 변환하고 이미지는 짝이 맞는 도구 결과 묶음 뒤의 메시지에 보존합니다. refusal을 포함한 지원하지 않는 part는 성공 문자열로 바꾸지 않고 원래 배열에 남깁니다.
 이미지의 `original` 상세도는 게이트웨이가 지원하는 `high`로 바꾸며 이미지 바이트는 그대로 유지합니다.
 네이티브 Responses 경로는 텍스트가 없는 완료 응답도 검사합니다. 출력 예산이 소진됐으면
 `incomplete / max_output_tokens`로 알리며 요청한 예산을 임의로 늘리지 않습니다.
